@@ -1,0 +1,511 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Mini Bomber — 2 Player (WASD+F / Arrows+L)</title>
+    <style>
+      :root {
+        --cell: 48px;
+      }
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+        font-family: Inter, system-ui, Segoe UI, Roboto, Arial;
+      }
+      body {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: #0b1220;
+        color: #e6eef8;
+      }
+      .wrap {
+        display: flex;
+        gap: 16px;
+        align-items: flex-start;
+      }
+      canvas {
+        background: #142339;
+        image-rendering: pixelated;
+        border-radius: 8px;
+        box-shadow: 0 8px 30px rgba(2, 6, 23, 0.6);
+      }
+      .ui {
+        max-width: 320px;
+      }
+      h1 {
+        margin: 0 0 8px;
+        font-size: 18px;
+      }
+      p {
+        margin: 4px 0;
+        color: #b9d1e9;
+      }
+      .controls {
+        background: #0f1a2a;
+        padding: 10px;
+        border-radius: 8px;
+      }
+      button {
+        margin-top: 8px;
+        padding: 8px 12px;
+        border-radius: 6px;
+        border: 0;
+        background: #2b6ea3;
+        color: white;
+        cursor: pointer;
+      }
+      .footer {
+        margin-top: 10px;
+        font-size: 13px;
+        color: #9fb7d6;
+      }
+      .score {
+        font-weight: 700;
+        margin-top: 8px;
+      }
+      .msg {
+        margin-top: 8px;
+        padding: 8px;
+        border-radius: 6px;
+        background: rgba(255, 255, 255, 0.03);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <canvas id="game" width="624" height="528"></canvas>
+      <div class="ui">
+        <h1>Mini Bomber — 2 Player</h1>
+        <div class="controls">
+          <p>
+            <strong>Player 1</strong>: Move <code>W A S D</code>, Bomb
+            <code>F</code>
+          </p>
+          <p>
+            <strong>Player 2</strong>: Move <code>↑ ↓ ← →</code>, Bomb
+            <code>L</code>
+          </p>
+
+          <div class="score" id="scoreboard">
+            Score — Player1: 0 | Player2: 0
+          </div>
+          <div class="score" id="status">
+            Press keys to play — first to kill the other wins
+          </div>
+
+          <div class="msg" id="message">
+            Tip: explosions remove destructible blocks and can chain through
+            empty spaces. Bombs block movement.
+          </div>
+          <button id="restart">Restart Game</button>
+        </div>
+
+        <div class="footer">Grid-based bomber clone with random abilities.</div>
+      </div>
+    </div>
+
+    <script>
+      (() => {
+        const canvas = document.getElementById("game");
+        const ctx = canvas.getContext("2d");
+        const CELL = 48;
+        const COLS = 13;
+        const ROWS = 11;
+        canvas.width = COLS * CELL;
+        canvas.height = ROWS * CELL;
+
+        let map = [];
+        function makeMap() {
+          map = new Array(ROWS).fill(0).map(() => new Array(COLS).fill(0));
+          for (let r = 0; r < ROWS; r++) {
+            for (let c = 0; c < COLS; c++) {
+              if (r === 0 || c === 0 || r === ROWS - 1 || c === COLS - 1)
+                map[r][c] = 1;
+            }
+          }
+          for (let r = 2; r < ROWS - 2; r += 2) {
+            for (let c = 2; c < COLS - 2; c += 2) {
+              map[r][c] = 1;
+            }
+          }
+          const blocked = new Set();
+          const spawn1 = [
+            [1, 1],
+            [1, 2],
+            [2, 1],
+          ];
+          const spawn2 = [
+            [ROWS - 2, COLS - 2],
+            [ROWS - 2, COLS - 3],
+            [ROWS - 3, COLS - 2],
+          ];
+          spawn1.concat(spawn2).forEach((p) => blocked.add(p.join(",")));
+          for (let r = 1; r < ROWS - 1; r++) {
+            for (let c = 1; c < COLS - 1; c++) {
+              if (map[r][c] !== 0) continue;
+              if (blocked.has([r, c].join(","))) continue;
+              if (Math.random() < 0.6) map[r][c] = 2;
+            }
+          }
+          spawn1.forEach(([r, c]) => (map[r][c] = 0));
+          spawn2.forEach(([r, c]) => (map[r][c] = 0));
+        }
+
+        makeMap();
+
+        function gridToPx(r, c) {
+          return { x: c * CELL, y: r * CELL };
+        }
+
+        const players = [
+          {
+            id: 1,
+            color: "#3aa0ff",
+            r: 1,
+            c: 1,
+            alive: true,
+            canPlaceBomb: true,
+            lastMove: 0,
+            moveDelay: 500,
+            maxBombs: 1,
+          },
+          {
+            id: 2,
+            color: "#ff6b6b",
+            r: ROWS - 2,
+            c: COLS - 2,
+            alive: true,
+            canPlaceBomb: true,
+            lastMove: 0,
+            moveDelay: 500,
+            maxBombs: 1,
+          },
+        ];
+
+        const bombs = [];
+        const explosions = [];
+        const abilities = [];
+        let gameOver = false;
+
+        const keys = {};
+        window.addEventListener("keydown", (e) => {
+          keys[e.key.toLowerCase()] = true;
+          if (e.key.toLowerCase() === "f") tryPlaceBomb(0);
+          if (e.key.toLowerCase() === "l") tryPlaceBomb(1);
+        });
+        window.addEventListener("keyup", (e) => {
+          keys[e.key.toLowerCase()] = false;
+        });
+
+        function tryPlaceBomb(playerIndex) {
+          const p = players[playerIndex];
+          if (!p.alive || !p.canPlaceBomb || gameOver) return;
+          if (bombs.filter((b) => b.owner === playerIndex).length >= p.maxBombs)
+            return;
+          if (bombs.some((b) => b.r === p.r && b.c === p.c)) return;
+          p.canPlaceBomb = false;
+          bombs.push({
+            r: p.r,
+            c: p.c,
+            owner: playerIndex,
+            t: Date.now(),
+            delay: 2000,
+            exploded: false,
+          });
+        }
+
+        function passable(r, c) {
+          if (r < 0 || c < 0 || r >= ROWS || c >= COLS) return false;
+          if (map[r][c] === 1 || map[r][c] === 2) return false;
+          if (bombs.some((b) => b.r === r && b.c === c)) return false;
+          return true;
+        }
+
+        function update(dt) {
+          if (gameOver) return;
+          const now = Date.now();
+
+          if (
+            players[0].alive &&
+            now - players[0].lastMove > players[0].moveDelay
+          ) {
+            if (keys["w"] && passable(players[0].r - 1, players[0].c)) {
+              players[0].r--;
+              players[0].lastMove = now;
+            } else if (keys["s"] && passable(players[0].r + 1, players[0].c)) {
+              players[0].r++;
+              players[0].lastMove = now;
+            } else if (keys["a"] && passable(players[0].r, players[0].c - 1)) {
+              players[0].c--;
+              players[0].lastMove = now;
+            } else if (keys["d"] && passable(players[0].r, players[0].c + 1)) {
+              players[0].c++;
+              players[0].lastMove = now;
+            }
+          }
+
+          if (
+            players[1].alive &&
+            now - players[1].lastMove > players[1].moveDelay
+          ) {
+            if (keys["arrowup"] && passable(players[1].r - 1, players[1].c)) {
+              players[1].r--;
+              players[1].lastMove = now;
+            } else if (
+              keys["arrowdown"] &&
+              passable(players[1].r + 1, players[1].c)
+            ) {
+              players[1].r++;
+              players[1].lastMove = now;
+            } else if (
+              keys["arrowleft"] &&
+              passable(players[1].r, players[1].c - 1)
+            ) {
+              players[1].c--;
+              players[1].lastMove = now;
+            } else if (
+              keys["arrowright"] &&
+              passable(players[1].r, players[1].c + 1)
+            ) {
+              players[1].c++;
+              players[1].lastMove = now;
+            }
+          }
+
+          for (let b of bombs) {
+            if (!b.exploded && now - b.t >= b.delay) {
+              explodeBomb(b);
+            }
+          }
+          for (let i = explosions.length - 1; i >= 0; i--) {
+            explosions[i].ttl -= dt;
+            if (explosions[i].ttl <= 0) explosions.splice(i, 1);
+          }
+          for (let i = bombs.length - 1; i >= 0; i--)
+            if (bombs[i].exploded) bombs.splice(i, 1);
+
+          // pickup ability
+          for (let p of players) {
+            if (!p.alive) continue;
+            for (let i = abilities.length - 1; i >= 0; i--) {
+              if (abilities[i].r === p.r && abilities[i].c === p.c) {
+                applyAbility(p, abilities[i].type);
+                abilities.splice(i, 1);
+              }
+            }
+          }
+
+          for (let p of players) {
+            if (!p.alive) continue;
+            if (explosions.some((ex) => ex.r === p.r && ex.c === p.c)) {
+              p.alive = false;
+              document.getElementById(
+                "message"
+              ).textContent = `Player ${p.id} died!`;
+              endIfOneLeft();
+            }
+          }
+        }
+
+        function explodeBomb(b) {
+          b.exploded = true;
+          const owner = players[b.owner];
+          if (owner) owner.canPlaceBomb = true;
+          explosions.push({ r: b.r, c: b.c, ttl: 500 });
+          const ranges = 2;
+          const dirs = [
+            [1, 0],
+            [-1, 0],
+            [0, 1],
+            [0, -1],
+          ];
+          for (const [dr, dc] of dirs) {
+            for (let s = 1; s <= ranges; s++) {
+              const rr = b.r + dr * s;
+              const cc = b.c + dc * s;
+              if (rr < 0 || cc < 0 || rr >= ROWS || cc >= COLS) break;
+              if (map[rr][cc] === 1) break;
+              explosions.push({ r: rr, c: cc, ttl: 500 });
+              if (map[rr][cc] === 2) {
+                map[rr][cc] = 0;
+                // drop ability chance
+                if (Math.random() < 0.3) {
+                  const types = ["speed", "stack"];
+                  const type = types[Math.floor(Math.random() * types.length)];
+                  abilities.push({ r: rr, c: cc, type });
+                }
+                break;
+              }
+            }
+          }
+        }
+
+        function applyAbility(player, type) {
+          if (type === "speed") {
+            player.moveDelay = 250;
+            document.getElementById(
+              "message"
+            ).textContent = `Player ${player.id} picked SPEED!`;
+          }
+          if (type === "stack") {
+            player.maxBombs = 2;
+            document.getElementById(
+              "message"
+            ).textContent = `Player ${player.id} picked STACK BOMB!`;
+          }
+        }
+
+        let score1 = 0;
+        let score2 = 0;
+        function updateScoreboard() {
+          document.getElementById(
+            "scoreboard"
+          ).textContent = `Score — Player1: ${score1} | Player2: ${score2}`;
+        }
+
+        function endIfOneLeft() {
+          const alive = players.filter((p) => p.alive);
+          if (alive.length <= 1) {
+            gameOver = true;
+            if (alive.length === 1) {
+              if (alive[0].id === 1) score1++;
+              else score2++;
+              updateScoreboard();
+              document.getElementById(
+                "status"
+              ).textContent = `Player ${alive[0].id} wins! Press Restart to play again.`;
+            } else {
+              document.getElementById(
+                "status"
+              ).textContent = `Draw — both died! Press Restart.`;
+            }
+          }
+        }
+
+        function draw() {
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+          ctx.fillStyle = "#0d1a26";
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+          for (let r = 0; r < ROWS; r++) {
+            for (let c = 0; c < COLS; c++) {
+              const x = c * CELL,
+                y = r * CELL;
+              ctx.fillStyle = (r + c) % 2 === 0 ? "#122633" : "#0f1e2b";
+              ctx.fillRect(x, y, CELL, CELL);
+              if (map[r][c] === 1) {
+                ctx.fillStyle = "#6b6b6b";
+                ctx.fillRect(x + 4, y + 4, CELL - 8, CELL - 8);
+              } else if (map[r][c] === 2) {
+                ctx.fillStyle = "#b07a4a";
+                ctx.fillRect(x + 6, y + 6, CELL - 12, CELL - 12);
+                ctx.strokeStyle = "rgba(0,0,0,0.15)";
+                ctx.strokeRect(x + 6, y + 6, CELL - 12, CELL - 12);
+              }
+            }
+          }
+
+          // draw abilities
+          for (let ab of abilities) {
+            const { x, y } = gridToPx(ab.r, ab.c);
+            if (ab.type === "speed") {
+              ctx.fillStyle = "#00ff99";
+              ctx.fillRect(x + 12, y + 12, CELL - 24, CELL - 24);
+            } else if (ab.type === "stack") {
+              ctx.fillStyle = "#ff00ff";
+              ctx.beginPath();
+              ctx.arc(x + CELL / 2, y + CELL / 2, CELL / 4, 0, Math.PI * 2);
+              ctx.fill();
+            }
+          }
+
+          for (let b of bombs) {
+            const { x, y } = gridToPx(b.r, b.c);
+            const remain = Math.max(0, b.delay - (Date.now() - b.t));
+            const scale = 0.6 + 0.4 * (1 - remain / b.delay);
+            const size = CELL * 0.5 * scale;
+            ctx.fillStyle = "#111";
+            ctx.beginPath();
+            ctx.ellipse(
+              x + CELL / 2,
+              y + CELL / 2,
+              size / 2,
+              size / 2,
+              0,
+              0,
+              Math.PI * 2
+            );
+            ctx.fill();
+            ctx.fillStyle = "#ffcc33";
+            ctx.font = "12px monospace";
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            const sec = Math.ceil(remain / 1000);
+            ctx.fillText(sec, x + CELL / 2, y + CELL / 2);
+          }
+
+          for (let ex of explosions) {
+            const { x, y } = gridToPx(ex.r, ex.c);
+            ctx.fillStyle = "rgba(255,140,0,0.9)";
+            ctx.fillRect(x + 4, y + 4, CELL - 8, CELL - 8);
+          }
+
+          for (let p of players) {
+            const { x, y } = gridToPx(p.r, p.c);
+            ctx.fillStyle = "rgba(0,0,0,0.25)";
+            ctx.fillRect(x + 6, y + 26, CELL - 12, 8);
+            if (p.alive) {
+              ctx.fillStyle = p.color;
+              ctx.fillRect(x + 8, y + 8, CELL - 16, CELL - 16);
+              ctx.fillStyle = "#06222b";
+              ctx.fillRect(x + 14, y + 18, 8, 6);
+            } else {
+              ctx.fillStyle = "rgba(255,255,255,0.08)";
+              ctx.fillRect(x + 8, y + 8, CELL - 16, CELL - 16);
+              ctx.fillStyle = "#ff4d4d";
+              ctx.fillText("X", x + CELL / 2, y + CELL / 2 + 4);
+            }
+          }
+
+          if (!gameOver) {
+            document.getElementById("status").textContent = "Game in progress…";
+          }
+        }
+
+        let last = performance.now();
+        function loop(ts) {
+          const dt = ts - last;
+          last = ts;
+          update(dt);
+          draw();
+          requestAnimationFrame(loop);
+        }
+        requestAnimationFrame(loop);
+
+        document.getElementById("restart").addEventListener("click", () => {
+          makeMap();
+          players[0].r = 1;
+          players[0].c = 1;
+          players[1].r = ROWS - 2;
+          players[1].c = COLS - 2;
+          players.forEach((p) => {
+            p.alive = true;
+            p.canPlaceBomb = true;
+            p.moveDelay = 500;
+            p.maxBombs = 1;
+          });
+          bombs.length = 0;
+          explosions.length = 0;
+          abilities.length = 0;
+          gameOver = false;
+          document.getElementById("status").textContent = "New game started!";
+          document.getElementById("message").textContent =
+            "Press WASD+F or Arrows+L to play.";
+        });
+      })();
+    </script>
+  </body>
+</html>
